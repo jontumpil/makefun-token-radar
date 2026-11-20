@@ -63,7 +63,7 @@
       second: function (p, c) { return "Provide the swapped assets as liquidity to " + p.name + "'s busiest pool and keep the LP position open."; },
       weekly: function (p, c) { return 'Make two or three small swaps a week, of $10 to $25 each, so the wallet builds real trading volume rather than one large trade.'; } },
     { key: 'bridge', match: ['bridge'],
-      open: function (p, c) { return 'Bridge ' + money(c.capital) + ' of USDC from Ethereum to ' + c.chain + ' through ' + p.name + ', and keep the bridged funds on the far side.'; },
+      open: function (p, c) { return 'Bridge ' + money(c.capital) + ' of USDC through ' + p.name + ' to ' + c.chain + ', the chain where most of its value sits, and keep the bridged funds on the far side.'; },
       second: function (p, c) { return 'Use the bridged funds in one app on ' + c.chain + ' (a deposit or a swap), so the trip ends in activity, not in an idle balance.'; },
       weekly: function (p, c) { return 'Bridge a small amount, $20 to $50, once more each fortnight, alternating direction, and use each landing the same day.'; } },
     { key: 'restaking', match: ['restaking', 'restaked'],

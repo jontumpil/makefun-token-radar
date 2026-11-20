@@ -57,9 +57,11 @@ export interface Snapshot {
 
 /** The model's constants, stated in the dashboard's method view. */
 export const MODEL = {
-  prior_strength: 4,
+  prior_strength: 6,
+  median_clamp_lo: 0.02,
+  median_clamp_hi: 2.0,
   multiple_floor: 0.05,
-  multiple_cap: 2.0,
+  multiple_cap: 1.5,
   growth_weight: 0.4,
   growth_floor_pct: -50,
   growth_cap_pct: 100,
@@ -106,13 +108,32 @@ export function isPreToken(p: SnapshotProtocol): boolean {
 /** DefiLlama's version-marker rule: a name ending in a release is a pool of another protocol. */
 const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 
+/** Categories the watchlist rule names as products of another protocol, or as exchanges. */
+const PRODUCT_CATEGORIES = new Set(['Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC', 'CEX']);
+
+/** A whole word in the name that marks a wrapped or staked product of a token that already trades. */
+const PRODUCT_WORDS = /\b(wrapped|staked|staking)\b/i;
+
+/** A name that begins with an exchange's name: the exchange's product, not a launch candidate. */
+const EXCHANGE_PREFIX = /^(Binance|Coinbase|Bybit|Kraken|Bitget|OKX|Bitfinex|Gemini)\b/;
+
 /**
- * Whether the board may rank a protocol: it records no token, it is not an exchange (a company,
- * not a launch candidate), and it is not a versioned pool of a protocol whose token trades. The
- * snapshot's watchlist rule already keeps every watchlist slug inside this set.
+ * Whether the board may rank a protocol as a launch candidate. The board applies the watchlist's
+ * own product exclusions at every size and drops only its $50M floor: a candidate records no
+ * token, is not a wrapped, staked or bridged product of one that trades (WBTC, Binance staked ETH
+ * and USDT0 are the snapshot's own examples), is not an exchange or its product, and is not a
+ * versioned pool of another protocol. One watchlist test cannot be applied here: DefiLlama's
+ * parent-protocol record is not one of the snapshot's ten fields, so a product whose parent is
+ * recorded only there can still appear; the list the house produced is ranked whole regardless.
  */
 export function isRankable(p: SnapshotProtocol): boolean {
-  return isPreToken(p) && p.category !== 'CEX' && !VERSIONED.test(p.name);
+  return (
+    isPreToken(p) &&
+    !PRODUCT_CATEGORIES.has(p.category ?? '') &&
+    !VERSIONED.test(p.name) &&
+    !PRODUCT_WORDS.test(p.name) &&
+    !EXCHANGE_PREFIX.test(p.name)
+  );
 }
 
 /** One category's calibration: the live evidence behind the multiple its pre-token rows are priced with. */
@@ -151,7 +172,9 @@ export function calibrate(snapshot: Snapshot): Calibration {
     .map(([category, ratios]) => {
       const med = median(ratios)!;
       const n = ratios.length;
-      const shrunk = (n * med + MODEL.prior_strength * globalMedian) / (n + MODEL.prior_strength);
+      // A category's own median is winsorised to a sane band before it is shrunk, so one extreme
+      // live protocol (a thin market's 9x print) cannot price a whole category on its own.
+      const shrunk = (n * clamp(med, MODEL.median_clamp_lo, MODEL.median_clamp_hi) + MODEL.prior_strength * globalMedian) / (n + MODEL.prior_strength);
       return { category, live_samples: n, median_ratio: round4(med), multiple: round4(clamp(shrunk, MODEL.multiple_floor, MODEL.multiple_cap)) };
     })
     .sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
@@ -367,6 +390,7 @@ export interface RadarData {
     protocols: number;
     pre_token: number;
     token_live: number;
+    products_set_aside: number;
     watchlist_size: number;
     board_size: number;
     live_size: number;
@@ -397,6 +421,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       protocols: snapshot.protocols.length,
       pre_token: snapshot.protocols.filter(isPreToken).length,
       token_live: snapshot.protocols.filter((p) => !isPreToken(p)).length,
+      products_set_aside: snapshot.protocols.filter((p) => isPreToken(p) && !isRankable(p)).length,
       watchlist_size: snapshot.watchlist.length,
       board_size: board.length,
       live_size: live.length,
