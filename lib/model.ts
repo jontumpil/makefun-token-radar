@@ -217,19 +217,21 @@ export function impliedValue(p: SnapshotProtocol, snapshot: Snapshot, calib: Cal
   const age = ageDays(snapshot.as_of, p.listed_at);
   const cal = multipleFor(p, calib);
   const growthPct = clamp(p.change_7d ?? 0, MODEL.growth_floor_pct, MODEL.growth_cap_pct);
-  const growthMult = 1 + (growthPct / 100) * MODEL.growth_weight;
+  // Every factor is rounded to 4 places before it prices the row, so the dashboard can recompute
+  // a row's implied value from the factors it prints and land on the board's number exactly.
+  const growthMult = round4(1 + (growthPct / 100) * MODEL.growth_weight);
   const ageForModel = age ?? calib.median_age_days;
-  const maturityMult = MODEL.maturity_floor + (Math.min(Math.max(ageForModel, 0), MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_range;
-  const breadthMult = 1 + MODEL.breadth_per_chain * Math.min(Math.max(p.chains.length - 1, 0), MODEL.breadth_max_extra);
+  const maturityMult = round4(MODEL.maturity_floor + (Math.min(Math.max(ageForModel, 0), MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_range);
+  const breadthMult = round4(1 + MODEL.breadth_per_chain * Math.min(Math.max(p.chains.length - 1, 0), MODEL.breadth_max_extra));
   const implied = Math.max(1, Math.round(p.tvl_usd * cal.multiple * growthMult * maturityMult * breadthMult));
   return {
     implied,
     multiple: cal.multiple,
     multiple_samples: cal.live_samples,
     growth_pct: growthPct,
-    growth_multiplier: round4(growthMult),
-    maturity_multiplier: round4(maturityMult),
-    breadth_multiplier: round4(breadthMult),
+    growth_multiplier: growthMult,
+    maturity_multiplier: maturityMult,
+    breadth_multiplier: breadthMult,
     age,
   };
 }
