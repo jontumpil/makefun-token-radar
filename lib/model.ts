@@ -20,6 +20,18 @@
 // states the calibration table the multiples came from, so a reader can check any row's price
 // against the live protocols it was calibrated on. Farm plans come from dashboard/farm.js, the one
 // generator the program and the page share.
+//
+// Three proofs ride along with the board, all computed from the same snapshot:
+//   Validate.   The fitting procedure is refit on one half of the snapshot alone (a slug-hash
+//               split) and priced against two disjoint held-out sets of live protocols — the only
+//               protocols whose true value is known — so the dashboard can state the model's
+//               out-of-sample error next to the model itself (validateModel).
+//   Account.    Every one of the snapshot's protocols is either a board row or set aside for one
+//               stated reason, counted on the dashboard: nothing is dropped silently
+//               (accountFor).
+//   Verdict.    Each row carries a farm / thin / skip verdict whose reasoning is costed: the
+//               plan's gas plus its capital carried by the week, set against the row's implied
+//               value and the evidence behind its multiple (verdictFor).
 
 import '../dashboard/farm.js';
 
@@ -71,10 +83,22 @@ export const MODEL = {
   breadth_per_chain: 0.015,
   breadth_max_extra: 10,
   fallback_age_days: 365,
+  // The verdict's cost model: capital locked in a farm plan is carried at this rate per week
+  // (about 10% a year), on top of the plan's gas, to give the plan's all-in cost.
+  capital_week_rate: 0.002,
+  // The verdict's bars, stated on the dashboard: a farm needs real implied value, a multiple
+  // backed by at least this many live peers, and a week that is not collapsing.
+  verdict_farm_min_usd: 2_500_000,
+  verdict_farm_min_samples: 3,
+  verdict_skip_below_usd: 1_000_000,
+  verdict_falling_pct: -25,
+  // A row with no live peer behind its multiple and a week this weak has neither evidence nor
+  // momentum: it is a skip at any size.
+  verdict_evidence_fall_pct: -10,
 };
 
 /** The model's version label: the dashboard names it. */
-export const MODEL_VERSION = 'radar-2 (snapshot-calibrated)';
+export const MODEL_VERSION = 'radar-3 (held-out validated)';
 
 /** How many live-token protocols the dashboard's "already trading" view carries, by market cap. */
 export const LIVE_ROWS = 40;
@@ -156,10 +180,14 @@ export interface Calibration {
 /**
  * The calibration pass: read every live protocol's market-cap-per-TVL ratio, take medians by
  * category, shrink thin categories toward the global median, clamp, and record the snapshot's
- * median protocol age for the rows whose listing date is unknown.
+ * median protocol age for the rows whose listing date is unknown. `restrict`, when given, limits
+ * both the ratios and the ages to the protocols it accepts: the held-out validation fits the
+ * identical procedure on its fit split alone, so nothing about a held-out protocol — not its
+ * ratio, not its age — can reach the multiples it is then priced with.
  */
-export function calibrate(snapshot: Snapshot): Calibration {
-  const live = snapshot.protocols.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
+export function calibrate(snapshot: Snapshot, restrict?: (p: SnapshotProtocol) => boolean): Calibration {
+  const pool = restrict === undefined ? snapshot.protocols : snapshot.protocols.filter(restrict);
+  const live = pool.filter((p) => !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0);
   const globalMedian = median(live.map((p) => p.mcap_usd! / p.tvl_usd)) ?? 0.25;
   const ratiosByCategory = new Map<string, number[]>();
   for (const p of live) {
@@ -179,7 +207,7 @@ export function calibrate(snapshot: Snapshot): Calibration {
     })
     .sort((a, b) => (a.category < b.category ? -1 : a.category > b.category ? 1 : 0));
   const byCategory = new Map(categories.map((c) => [c.category, c]));
-  const ages = snapshot.protocols.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null);
+  const ages = pool.map((p) => ageDays(snapshot.as_of, p.listed_at)).filter((a): a is number => a !== null);
   return {
     global_samples: live.length,
     global_median_ratio: round4(globalMedian),
@@ -236,6 +264,208 @@ export function impliedValue(p: SnapshotProtocol, snapshot: Snapshot, calib: Cal
   };
 }
 
+/** A stable 32-bit FNV-1a hash of a slug: the same slug lands in the same split on every run. */
+function slugHash(slug: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < slug.length; i++) {
+    h ^= slug.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h >>> 0;
+}
+
+/**
+ * The validation split: a protocol's bucket is its slug hash mod 4. Buckets 0 and 1 are the fit
+ * split; bucket 2 is held-out A and bucket 3 is held-out B — two disjoint held-out sets, neither
+ * of which the fit ever sees, assigned by the slug alone so the split is the same for every run
+ * and every reader.
+ */
+export function splitBucket(slug: string): number {
+  return slugHash(slug) % 4;
+}
+
+/** Whether a protocol can teach or test the model: a live token with both a market cap and a TVL. */
+function isCalibratable(p: SnapshotProtocol): boolean {
+  return !isPreToken(p) && p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0;
+}
+
+/** One held-out set's score: how far the fit-split model's prices land from the market caps it never saw. */
+export interface HoldoutScore {
+  split: string;
+  bucket: number;
+  n: number;
+  median_ape_pct: number;
+  mean_ape_pct: number;
+  median_pred_ratio: number;
+  /** The share of the set priced within a factor of three of its market cap, either way. */
+  within_3x_pct: number;
+}
+
+/** The held-out validation's whole report, rendered on the dashboard beside the model. */
+export interface Validation {
+  method: string;
+  fit_protocols: number;
+  fit_live: number;
+  fit_global_median_ratio: number;
+  holdouts: HoldoutScore[];
+}
+
+const round1 = (n: number): number => Math.round(n * 10) / 10;
+const round2 = (n: number): number => Math.round(n * 100) / 100;
+
+/**
+ * The held-out validation. Only live-token protocols can be tested: their market cap is a fact,
+ * where a pre-token protocol's value is the model's own claim. The fitting procedure — category
+ * medians, shrinkage, clamps, the median age — is refit on the fit split alone and then prices
+ * each held-out protocol with the full pricing formula; the error is against the market cap the
+ * fit never saw. The board itself is priced by the same procedure refit on every live protocol:
+ * the validation measures the procedure, twice, on two disjoint sets.
+ */
+export function validateModel(snapshot: Snapshot): Validation {
+  const inFit = (p: SnapshotProtocol): boolean => splitBucket(p.slug) < 2;
+  const fitCalib = calibrate(snapshot, inFit);
+  const holdouts: HoldoutScore[] = [2, 3].map((bucket) => {
+    const rows = snapshot.protocols.filter((p) => splitBucket(p.slug) === bucket && isCalibratable(p));
+    const apes: number[] = [];
+    const ratios: number[] = [];
+    for (const p of rows) {
+      const predicted = impliedValue(p, snapshot, fitCalib).implied;
+      apes.push(Math.abs(predicted - p.mcap_usd!) / p.mcap_usd!);
+      ratios.push(predicted / p.mcap_usd!);
+    }
+    return {
+      split: bucket === 2 ? 'A' : 'B',
+      bucket,
+      n: rows.length,
+      median_ape_pct: round1((median(apes) ?? 0) * 100),
+      mean_ape_pct: round1((apes.reduce((a, b) => a + b, 0) / Math.max(1, apes.length)) * 100),
+      median_pred_ratio: round2(median(ratios) ?? 0),
+      within_3x_pct: round1((ratios.filter((r) => r >= 1 / 3 && r <= 3).length / Math.max(1, ratios.length)) * 100),
+    };
+  });
+  return {
+    method:
+      'Every protocol is assigned to a split by its slug hash (FNV-1a mod 4): buckets 0-1 fit, bucket 2 held-out A, bucket 3 held-out B. ' +
+      'Every fitted term — the category multiples, the global median, the median age — is fitted on the fit split alone, then the full pricing ' +
+      'formula prices the held-out live protocols against the market caps the fit never saw. The board is priced by the same procedure refit on all live protocols.',
+    fit_protocols: snapshot.protocols.filter(inFit).length,
+    fit_live: snapshot.protocols.filter((p) => inFit(p) && isCalibratable(p)).length,
+    fit_global_median_ratio: fitCalib.global_median_ratio,
+    holdouts,
+  };
+}
+
+/** One line of the coverage accounting: a reason a protocol is not on the board, and how many it takes. */
+export interface CoverageReason {
+  key: string;
+  label: string;
+  count: number;
+}
+
+/** The integrity accounting: every protocol in the snapshot, scored or set aside for a stated reason. */
+export interface Coverage {
+  total: number;
+  scored: number;
+  reasons: CoverageReason[];
+}
+
+/**
+ * Why a protocol is not ranked, in the order the tests bite: it already trades; it has no usable
+ * TVL; or it is a product of a token that trades, by category, by version marker, by a wrapped or
+ * staked word in its name, or as an exchange's own product. Null when none of them bites — which
+ * for a pre-token protocol means the board ranks it, so the accounting and the board agree.
+ */
+function setAsideReason(p: SnapshotProtocol): { key: string; label: string } | null {
+  if (!isPreToken(p)) return { key: 'token_trades', label: 'already records a token — never ranked as a launch' };
+  if (!(p.tvl_usd > 0)) return { key: 'no_tvl', label: 'records no usable TVL to price from' };
+  if (PRODUCT_CATEGORIES.has(p.category ?? '')) return { key: 'product_category', label: 'a product category — bridge, liquid staking or restaking, or an exchange' };
+  if (VERSIONED.test(p.name)) return { key: 'versioned_name', label: 'a versioned pool of another protocol — its name ends in a version marker' };
+  if (PRODUCT_WORDS.test(p.name)) return { key: 'wrapped_word', label: 'named as a wrapped or staked product of a token that trades' };
+  if (EXCHANGE_PREFIX.test(p.name)) return { key: 'exchange_prefix', label: "an exchange's own product — its name opens with the exchange's" };
+  return null;
+}
+
+/** Account for every protocol the snapshot carries: the board's rows plus one reason per protocol left off. */
+export function accountFor(snapshot: Snapshot, board: BoardRow[]): Coverage {
+  const onBoard = new Set(board.map((r) => r.slug));
+  const counts = new Map<string, CoverageReason>();
+  for (const p of snapshot.protocols) {
+    if (onBoard.has(p.slug)) continue;
+    const reason = setAsideReason(p) ?? { key: 'other', label: 'set aside by the rankability rule' };
+    const row = counts.get(reason.key) ?? { ...reason, count: 0 };
+    row.count += 1;
+    counts.set(reason.key, row);
+  }
+  const order = ['token_trades', 'no_tvl', 'product_category', 'versioned_name', 'wrapped_word', 'exchange_prefix', 'other'];
+  const reasons = [...counts.values()].sort((a, b) => order.indexOf(a.key) - order.indexOf(b.key));
+  return { total: snapshot.protocols.length, scored: board.length, reasons };
+}
+
+/** A whole-dollar figure for the verdict's reasoning, in the board's own compact style. */
+function usdText(n: number): string {
+  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
+  if (n >= 1e6) return `$${(n / 1e6).toFixed(1)}M`;
+  if (n >= 1e3) return `$${Math.round(n / 1e3)}K`;
+  return `$${Math.round(n)}`;
+}
+
+/** A board row's verdict: farm it, a thin case, or skip it — with the costed reasoning stated. */
+export interface Verdict {
+  verdict: 'farm' | 'thin' | 'skip';
+  reason: string;
+  all_in_cost_usd: number;
+}
+
+/**
+ * The verdict, from the row's own numbers. The plan's all-in cost is its gas plus its capital
+ * carried at MODEL.capital_week_rate a week. A farm needs implied value at or above
+ * MODEL.verdict_farm_min_usd, a multiple backed by at least MODEL.verdict_farm_min_samples live
+ * peers, and a week no worse than MODEL.verdict_falling_pct. A row is a skip when its implied
+ * value is under MODEL.verdict_skip_below_usd, or when it has neither evidence nor momentum (no
+ * live peer prices its category and its TVL is falling). Everything else is thin, and the reason
+ * names the weak leg.
+ */
+export function verdictFor(p: SnapshotProtocol, priced: Priced, farm: { capital_usd: number; weeks: number; est_gas_usd: number }): Verdict {
+  const carry = Math.round(farm.capital_usd * farm.weeks * MODEL.capital_week_rate);
+  const allIn = farm.est_gas_usd + carry;
+  const cost = `the plan costs about ${usdText(allIn)} all-in (${usdText(farm.est_gas_usd)} gas + ${usdText(carry)} capital carry over ${farm.weeks} weeks)`;
+  const change = p.change_7d ?? 0;
+  if (priced.implied < MODEL.verdict_skip_below_usd) {
+    return {
+      verdict: 'skip',
+      all_in_cost_usd: allIn,
+      reason: `Skip: at ${usdText(priced.implied)} this is the board's tail — ${cost}, and the weeks buy a position in the smallest kind of launch the board carries. Skip it unless you already use the protocol.`,
+    };
+  }
+  if (priced.multiple_samples === 0 && change <= MODEL.verdict_evidence_fall_pct) {
+    return {
+      verdict: 'skip',
+      all_in_cost_usd: allIn,
+      reason: `Skip: no live peer prices its category, so its multiple is the global median alone, and its TVL fell ${Math.abs(round1(change))}% this week — the model has neither evidence nor momentum here, while ${cost}.`,
+    };
+  }
+  if (priced.implied >= MODEL.verdict_farm_min_usd && priced.multiple_samples >= MODEL.verdict_farm_min_samples && change > MODEL.verdict_falling_pct) {
+    return {
+      verdict: 'farm',
+      all_in_cost_usd: allIn,
+      reason: `Farm: ${usdText(priced.implied)} of implied value against ${cost} — the multiple of ${priced.multiple}x rests on ${priced.multiple_samples} live peers, and the position costs a small fraction of the launch it positions for.`,
+    };
+  }
+  const weak =
+    priced.multiple_samples === 0
+      ? 'its multiple is the global median alone — no live peer trades in its category, the thinnest evidence the model gives'
+      : priced.multiple_samples < MODEL.verdict_farm_min_samples
+        ? `its multiple rests on only ${priced.multiple_samples} live peer${priced.multiple_samples === 1 ? '' : 's'}`
+        : change <= MODEL.verdict_falling_pct
+          ? `its TVL fell ${Math.abs(round1(change))}% this week, so the record it would launch from is shrinking`
+          : `its implied value sits in the board's middle band, below the ${usdText(MODEL.verdict_farm_min_usd)} the farm verdict asks for`;
+  return {
+    verdict: 'thin',
+    all_in_cost_usd: allIn,
+    reason: `Thin: ${usdText(priced.implied)} of implied value and ${cost}, but ${weak}. Worth it only at small size, or if you already use it.`,
+  };
+}
+
 /** One row of board.json: the ranked board's row, its price's workings, and its farm plan. */
 export interface BoardRow {
   rank: number;
@@ -263,6 +493,9 @@ export interface BoardRow {
     age_days: number | null;
   };
   farm: { archetype: string; capital_usd: number; weeks: number; est_gas_usd: number };
+  verdict: 'farm' | 'thin' | 'skip';
+  verdict_reason: string;
+  all_in_cost_usd: number;
   farm_steps: string[];
 }
 
@@ -286,6 +519,7 @@ export function buildBoard(snapshot: Snapshot, calib: Calibration): { board: Boa
     const steps = FARM.farmStepsFor(s.p, s.priced.age);
     stepsBySlug.set(s.p.slug, steps);
     const summary = FARM.planSummary(s.p, s.priced.age);
+    const verdict = verdictFor(s.p, s.priced, summary);
     return {
       rank: i + 1,
       slug: s.p.slug,
@@ -312,6 +546,9 @@ export function buildBoard(snapshot: Snapshot, calib: Calibration): { board: Boa
         age_days: s.priced.age,
       },
       farm: summary,
+      verdict: verdict.verdict,
+      verdict_reason: verdict.reason,
+      all_in_cost_usd: verdict.all_in_cost_usd,
       farm_steps: steps.map(FARM.stepText),
     };
   });
@@ -373,6 +610,9 @@ export interface RadarRow {
     est_gas_usd: number;
     steps: { text: string; cost: string; time: string }[];
   };
+  verdict: 'farm' | 'thin' | 'skip';
+  verdict_reason: string;
+  all_in_cost_usd: number;
 }
 
 /** Everything the dashboard renders, from the snapshot. */
@@ -388,6 +628,8 @@ export interface RadarData {
     median_age_days: number;
     categories: CategoryCalibration[];
   };
+  validation: Validation;
+  coverage: Coverage;
   stats: {
     protocols: number;
     pre_token: number;
@@ -419,6 +661,8 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       median_age_days: calib.median_age_days,
       categories: calib.categories,
     },
+    validation: validateModel(snapshot),
+    coverage: accountFor(snapshot, board),
     stats: {
       protocols: snapshot.protocols.length,
       pre_token: snapshot.protocols.filter(isPreToken).length,
@@ -447,6 +691,9 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
       maturity_multiplier: row.model.maturity_multiplier,
       breadth_multiplier: row.model.breadth_multiplier,
       farm: { ...row.farm, steps: stepsBySlug.get(row.slug)! },
+      verdict: row.verdict,
+      verdict_reason: row.verdict_reason,
+      all_in_cost_usd: row.all_in_cost_usd,
     })),
     live,
   };

@@ -29,6 +29,7 @@
     return Math.max(0, Math.round(days)) + 'd';
   }
   function fmtMult(n) { return 'x' + Number(n).toFixed(4); }
+  function fmtCostPct(r) { var p = (r.all_in_cost_usd / r.implied_value_usd) * 100; return p < 0.01 ? '<0.01%' : p.toFixed(2) + '%'; }
   // The page recomputes a row's implied value from the factors it prints: the model's factors are
   // rounded to 4 places before they price a row, so this lands on board.json's number exactly.
   function impliedOf(r) {
@@ -144,10 +145,25 @@
   }
 
   function methodBand() {
-    var c = DATA.calibration;
+    var c = DATA.calibration, v = DATA.validation;
+    var h = v.holdouts.map(function (x) { return x.split + ' ' + x.median_ape_pct + '%'; }).join(' · ');
     return el('section', { class: 'method-band' },
       el('div', { class: 'formula', text: 'implied = TVL x multiple x growth x maturity x breadth' }),
-      el('p', { text: 'The multiple is calibrated, not chosen: the median market cap per TVL of the ' + c.global_samples + ' live protocols in the same category (global median ' + c.global_median_ratio.toFixed(3) + 'x), shrunk toward that median when a category has few live peers. Full table in the Method tab.' })
+      el('p', { text: 'The multiple is calibrated, not chosen: the median market cap per TVL of the ' + c.global_samples + ' live protocols in the same category (global median ' + c.global_median_ratio.toFixed(3) + 'x), shrunk toward that median when a category has few live peers. Tested out of sample: fitted on half the snapshot alone, the same procedure prices two disjoint held-out sets of live protocols with median errors of ' + h + ' — wide, and stated in full in the Method tab.' })
+    );
+  }
+
+  var COVERAGE_SHORT = {
+    token_trades: 'already record a token', product_category: 'product categories', versioned_name: 'versioned pools',
+    wrapped_word: 'wrapped or staked names', exchange_prefix: 'exchange products', no_tvl: 'no usable TVL', other: 'other product markers'
+  };
+
+  function integrityStrip() {
+    var cov = DATA.coverage;
+    var parts = [cov.scored + ' ranked on the board'].concat(cov.reasons.map(function (r) { return r.count + ' ' + (COVERAGE_SHORT[r.key] || r.key); }));
+    return el('section', { class: 'method-band integrity' },
+      el('div', { class: 'formula', text: cov.total + ' protocols, all accounted for' }),
+      el('p', null, parts.join(' · ') + '. Nothing is dropped silently: the board and this accounting are computed in the same pass, and the full table is in the Method tab.')
     );
   }
 
@@ -223,6 +239,7 @@
           el('div', { class: 'bar', 'aria-hidden': 'true' }, el('i', { style: 'width:' + Math.max(3, Math.round((r.implied_value_usd / max) * 100)) + '%' })),
           el('span', { class: 'num', text: fmtUsd(r.implied_value_usd) })
         )),
+        el('td', null, el('span', { class: 'tag ' + r.verdict, text: r.verdict })),
         el('td', { class: 'plan' }, el('b', { text: '≈' + fmtUsd(r.farm.est_gas_usd) + ' gas' }), ' · ' + r.farm.weeks + ' wks'),
         el('td', null, r.watchlist ? el('span', { class: 'tag', text: 'Watchlist' }) : el('span', { class: 'tag early', text: 'Early' }))
       );
@@ -240,6 +257,7 @@
             sortHeader('age', 'Age'),
             sortHeader('multiple', 'x TVL'),
             sortHeader('implied', 'Implied value'),
+            el('th', { scope: 'col', text: 'Verdict' }),
             el('th', { scope: 'col', text: 'Farm plan' }),
             el('th', { scope: 'col', text: 'List' })
           )),
@@ -301,7 +319,8 @@
             el('li', null, el('b', { text: 'Breadth factor. ' }), '1 + ' + m.breadth_per_chain + ' per chain past the first, up to 10: a protocol live on more chains has more surface for a token to be useful on.')
           ),
           el('p', null, el('b', { text: 'Who is ranked. ' }), 'Every protocol that records no token, minus the products: ' + s.products_set_aside + ' pre-token records are set aside as wrapped, staked or bridged products of tokens that already trade, exchanges and their products, or versioned pools, by the same tests the watchlist itself uses. The watchlist\'s $50M floor is the only test dropped. A protocol is said to record no token, never to have none: DefiLlama\'s record is the evidence, and it can lag.'),
-          el('p', null, el('b', { text: 'Farm plans. ' }), 'Each row\'s plan is generated from its own record: the category picks the archetype (right), the first chain prices the gas, the TVL sizes the position, and the age sets the plan\'s length in weeks. Every step names its cost and its time; the gas and week totals on the board are the plan\'s own sums.')
+          el('p', null, el('b', { text: 'Farm plans. ' }), 'Each row\'s plan is generated from its own record: the category picks the archetype (right), the first chain prices the gas, the TVL sizes the position, and the age sets the plan\'s length in weeks. Every step names its cost and its time; the gas and week totals on the board are the plan\'s own sums.'),
+          el('p', null, el('b', { text: 'Verdicts. ' }), 'Every row is verdicted farm, thin or skip from its own numbers, never by name. The plan\'s all-in cost is its gas plus its capital carried at ' + (m.capital_week_rate * 100).toFixed(1) + '% a week. Farm asks an implied value of at least ' + fmtUsd(m.verdict_farm_min_usd) + ', a multiple backed by ' + m.verdict_farm_min_samples + ' or more live peers, and a week no worse than ' + m.verdict_falling_pct + '%. Skip is an implied value under ' + fmtUsd(m.verdict_skip_below_usd) + ', or no live peer behind the multiple with the week\'s TVL down past ' + m.verdict_evidence_fall_pct + '%. Everything else is thin; each detail view states its row\'s reason with its costs.')
         ),
         el('section', { class: 'card' },
           el('h2', { text: 'Calibration: what the market pays per $1 of TVL' }),
@@ -312,6 +331,45 @@
             )
           ),
           el('p', { class: 'note', text: 'Read from the ' + c.global_samples + ' live protocols in this same snapshot that record both a market cap and a TVL. Thin categories sit close to the global median by construction; the multiple used is the claim, the median is the evidence.' })
+        )
+      ),
+      el('div', { class: 'method-grid' },
+        el('section', { class: 'card' },
+          el('h2', { text: 'Held-out validation: fitted here, tested there' }),
+          el('p', { text: DATA.validation.method }),
+          el('div', { class: 'table-wrap' },
+            el('table', { class: 'calib' },
+              el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Held-out set' }), el('th', { scope: 'col', text: 'Live n' }), el('th', { scope: 'col', text: 'Median error' }), el('th', { scope: 'col', text: 'Mean error' }), el('th', { scope: 'col', text: 'Priced, median' }), el('th', { scope: 'col', text: 'Within 3x' }))),
+              el('tbody', null, DATA.validation.holdouts.map(function (x) {
+                return el('tr', null,
+                  el('td', { text: 'Held-out ' + x.split }),
+                  el('td', { class: 'num', text: String(x.n) }),
+                  el('td', { class: 'num', text: x.median_ape_pct + '%' }),
+                  el('td', { class: 'num', text: x.mean_ape_pct + '%' }),
+                  el('td', { class: 'num', text: x.median_pred_ratio + 'x actual' }),
+                  el('td', { class: 'num', text: x.within_3x_pct + '%' })
+                );
+              }))
+            )
+          ),
+          el('p', { class: 'note', text: 'Fitted on ' + DATA.validation.fit_protocols + ' protocols (' + DATA.validation.fit_live + ' of them live) alone; the fit split\'s own global median is ' + DATA.validation.fit_global_median_ratio.toFixed(3) + 'x against ' + c.global_median_ratio.toFixed(3) + 'x fitted on all data, and part of the error above is that difference. The rest is real: protocols inside one category trade at very different multiples, so a category median is a prior, not a price. That is why every row shows its own workings, and why the verdicts weigh the live evidence behind each multiple.' })
+        ),
+        el('section', { class: 'card' },
+          el('h2', { text: 'Coverage: all ' + DATA.coverage.total + ' protocols accounted for' }),
+          el('div', { class: 'table-wrap' },
+            el('table', { class: 'calib' },
+              el('thead', null, el('tr', null, el('th', { scope: 'col', text: 'Disposition' }), el('th', { scope: 'col', text: 'Protocols' }))),
+              el('tbody', null,
+                [el('tr', null, el('td', { text: 'Ranked on the board' }), el('td', { class: 'num', text: String(DATA.coverage.scored) }))].concat(
+                  DATA.coverage.reasons.map(function (r) {
+                    return el('tr', null, el('td', { text: r.label }), el('td', { class: 'num', text: String(r.count) }));
+                  }),
+                  [el('tr', null, el('td', null, el('b', { text: 'Snapshot total' })), el('td', { class: 'num', text: String(DATA.coverage.total) }))]
+                )
+              )
+            )
+          ),
+          el('p', { class: 'note', text: 'Counted in the same pass that builds the board: a protocol is either a row or carries the first reason that sets it aside, in the order the table gives, so the board and this accounting cannot disagree. Of the protocols that already trade, ' + c.global_samples + ' record both a market cap and a TVL; they alone can teach the model (the calibration above) or test it (the validation beside it).' })
         )
       ),
       el('section', { class: 'card' },
@@ -411,6 +469,17 @@
               )
             ),
             el('p', { class: 'note' }, 'This page recomputes the row from the same factors: ', el('span', { class: agrees ? 'check' : '', text: usdFull.format(recomputed) + (agrees ? ' — the same number board.json carries.' : ' — which differs from the board; the data would be stale.') }), cal ? ' Category evidence: median ' + fmtMult(cal.median_ratio) + ' over ' + cal.live_samples + ' live peer' + (cal.live_samples === 1 ? '' : 's') + '.' : '')
+          ),
+          el('section', { class: 'card' },
+            el('h2', null, 'Verdict — ', el('span', { class: 'tag ' + row.verdict, text: row.verdict })),
+            el('p', { text: row.verdict_reason }),
+            el('div', { class: 'kv' },
+              el('div', null, el('span', { text: 'Gas, whole plan' }), el('b', { text: '≈' + fmtUsd(row.farm.est_gas_usd) })),
+              el('div', null, el('span', { text: 'Capital carry' }), el('b', { text: '≈' + fmtUsd(row.all_in_cost_usd - row.farm.est_gas_usd) })),
+              el('div', null, el('span', { text: 'All-in cost' }), el('b', { text: '≈' + fmtUsd(row.all_in_cost_usd) })),
+              el('div', null, el('span', { text: 'Cost vs implied' }), el('b', { text: fmtCostPct(row) }))
+            ),
+            el('p', { class: 'note', text: 'The carry prices the plan\'s capital at ' + (DATA.model.capital_week_rate * 100).toFixed(1) + '% a week (about 10% a year): the gas is spent, the capital is only tied up and comes back on exit. The verdict rule is stated in the Method tab.' })
           )
         ),
         el('section', { class: 'card' },
@@ -443,6 +512,7 @@
       shell.appendChild(detailView(selected));
     } else {
       shell.appendChild(lede());
+      shell.appendChild(integrityStrip());
       shell.appendChild(methodBand());
       shell.appendChild(controls());
       shell.appendChild(state.tab === 'live' ? liveTable() : state.tab === 'method' ? methodView() : boardTable());

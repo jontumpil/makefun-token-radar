@@ -7,8 +7,10 @@
 An entry for make.fun's [token-radar-01](https://make.fun/c/token-radar-01) bounty. The program
 reads the sealed DefiLlama snapshot (758 protocols), finds the ones that record no token yet,
 ranks them by what a launch would be worth if their record stayed as it is, and hands in a static
-dashboard: the ranked board, a detail view for every protocol with its price's full workings and
-a concrete farm plan, an "already trading" view, and a method view that states the model.
+dashboard: the ranked board with a costed farm / thin / skip verdict on every row, a detail view
+for every protocol with its price's full workings, its verdict's reasoning and a concrete farm
+plan, an "already trading" view, and a method view that states the model, tests it on held-out
+data, and accounts for every protocol in the snapshot.
 
 ## The model: priced from the snapshot, not from a list
 
@@ -29,6 +31,31 @@ calibrates the multiple from the snapshot itself:
 
 No protocol's name is special-cased anywhere: one function prices every row, and the dashboard's
 Method tab prints the whole calibration table the multiples came from.
+
+**Validated out of sample.** The dashboard does not ask to be trusted: the fitting procedure is
+tested on data it never fitted. Every protocol is assigned to a split by its slug hash (FNV-1a
+mod 4); the multiples, the global median and the median age are refit on the fit half alone
+(391 protocols, 60 of them live), then the full formula prices two disjoint held-out sets of
+live protocols — the only protocols whose true value is known. Held-out A (30 protocols):
+median absolute error 237.1%, the median protocol priced at 3.37x its market cap, 26.7% priced
+within a factor of three. Held-out B (38 protocols): median error 87.5%, median priced 1.31x,
+36.8% within a factor of three. The errors are wide — protocols inside one category trade at
+very different multiples, so a category median is a prior, not a price — and they are printed
+on the dashboard next to the model, not buried. The board itself is priced by the same
+procedure refit on all 128 live protocols.
+
+**Every protocol accounted for.** The dashboard's integrity strip and Method tab count all
+758 protocols: 198 ranked, 416 already recording a token, and 144 pre-token records set aside
+with a stated reason — 128 in product categories (bridge, liquid staking or restaking, CEX),
+11 versioned pools, 5 named as wrapped or staked products. The accounting is computed in the
+same pass that builds the board, so the two cannot disagree; nothing is dropped silently.
+
+**Verdicts, costed.** Every row carries a farm, thin or skip verdict with its reasoning. The
+plan's all-in cost is its gas plus its capital carried at 0.2% a week (about 10% a year). Farm
+asks an implied value of at least $2.5M, a multiple backed by at least 3 live peers, and a week
+no worse than -25%; skip is an implied value under $1M, or no live peer behind the multiple
+with the week's TVL down past -10%; everything else is thin, and the detail view names the
+weak leg. On this snapshot: 59 farm, 124 thin, 15 skip.
 
 **Who is ranked.** All 40 watchlist protocols (the floor), plus every other genuine launch
 candidate at any size — 198 rows in all. The board applies the watchlist's own product exclusions
@@ -63,7 +90,8 @@ The program is deterministic: two runs on the same snapshot write identical byte
 ## Layout
 
 - `main.ts` — the program: snapshot in, board + dashboard + dossier out
-- `lib/model.ts` — the calibration, the pricing model, the board builder, the gate self-check
+- `lib/model.ts` — the calibration, the pricing model, the held-out validation, the coverage
+  accounting, the verdicts, the board builder, the gate self-check
 - `dashboard/` — the static page (`index.html`, `app.css`, `app.js`) plus `farm.js`, the shared
   farm-plan generator
 - `screenshots/` — the board, a protocol's detail view, and a filtered view, rendered from the

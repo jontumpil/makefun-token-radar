@@ -54,7 +54,10 @@ if (issue !== null) {
 }
 
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model_version: radar.model_version, as_of: snapshot.as_of, rows: board })}\n`);
+writeFileSync(
+  join(out, 'board.json'),
+  `${JSON.stringify({ model_version: radar.model_version, as_of: snapshot.as_of, validation: radar.validation, coverage: radar.coverage, rows: board })}\n`,
+);
 writeFileSync(join(out, 'data.js'), dataScript(radar));
 
 /** Copy a directory's regular files into `to`, recursively, skipping names that start with a dot. */
@@ -91,10 +94,14 @@ for (const name of shots) {
 // The dossier is written last: the scorer rebuilds it from this /output and compares bytes.
 writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: TEXT_MAX_BYTES, screenshots: SCREENSHOT_CAPS, dashboard: DASHBOARD_CAPS }));
 
+const holdoutText = radar.validation.holdouts.map((h) => `${h.split} n=${h.n} median APE ${h.median_ape_pct}%`).join(', ');
+const asideText = radar.coverage.reasons.map((r) => `${r.count} ${r.key}`).join(', ');
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols (${radar.stats.pre_token} pre-token, ${radar.stats.token_live} already trading), ` +
     `${board.length} rows ranked, watchlist ${radar.stats.watchlist_size}/${radar.stats.watchlist_size} covered, ` +
     `calibrated on ${radar.calibration.global_samples} live ratios (global median ${radar.calibration.global_median_ratio} x TVL)\n` +
+    `token radar: held-out validation (fit on ${radar.validation.fit_live} live alone): ${holdoutText}; ` +
+    `coverage ${radar.coverage.scored} scored + ${radar.coverage.total - radar.coverage.scored} set aside (${asideText}) = ${radar.coverage.total}\n` +
     `token radar: wrote ${join(out, 'board.json')}, ${join(out, 'data.js')}, ${join(out, 'dashboard')} (${dashFiles.length} files), ` +
     `${join(out, 'screenshots')} (${shots.length} images) and ${join(out, 'dossier.json')}\n`,
 );
