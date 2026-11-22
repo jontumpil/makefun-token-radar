@@ -1,16 +1,90 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar — pre-token protocols ranked by implied value</title>
+<title>Launch Radar — pre-token protocols priced by a fitted model</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<a class="skip" href="#app">Skip to the board</a>
-<main id="app" tabindex="-1" aria-busy="true"></main>
+<header class="top">
+  <div class="brand">
+    <span class="blip"></span>
+    <div>
+      <h1>Launch Radar</h1>
+      <p class="sub">Pre-token protocols, priced by a model fitted on protocols that already trade. Snapshot as of <span id="asof">—</span>.</p>
+    </div>
+  </div>
+</header>
+
+<section class="integrity" id="integrity">
+  <h2>How this board earns trust</h2>
+  <p>The pricing model is fitted on <strong id="trained-on">—</strong> already-traded protocols
+  (log-log OLS on TVL, age and chain count, plus a shrunken category offset). Out of sample it is
+  honest about its error: held-out A typical multiple <strong id="val-a">—</strong>,
+  held-out B <strong id="val-b">—</strong>, walk-forward <strong id="val-wf">—</strong>,
+  leave-one-out <strong id="val-loo">—</strong>.</p>
+  <p>A growth variant (adding 7d change as a feature) was tested on the same held-out folds
+  (A <span id="val-ga">—</span>, B <span id="val-gb">—</span>) and was <em>not</em> used for pricing;
+  7d change informs timing judgement in the verdict notes instead.</p>
+  <p>Accounting: <span id="acct">—</span> protocols scanned = <span id="acct-traded">—</span> already trading
+  + <span id="acct-board">—</span> on this board + <span id="acct-aside">—</span> set aside
+  (wrapped / staked / bridged / versioned / exchange-branded names and excluded categories).
+  Every implied value below is this board's own claim, produced by the model above — not a market price.</p>
+</section>
+
+<section class="kpis" id="kpis">
+  <div class="kpi"><span class="kpi-num" id="kpi-scanned">—</span><span class="kpi-label">protocols scanned</span></div>
+  <div class="kpi"><span class="kpi-num" id="kpi-rows">—</span><span class="kpi-label">board rows</span></div>
+  <div class="kpi"><span class="kpi-num" id="kpi-watch">—</span><span class="kpi-label">watchlist covered</span></div>
+  <div class="kpi"><span class="kpi-num" id="kpi-ff">—</span><span class="kpi-label">FARM FIRST rows</span></div>
+  <div class="kpi"><span class="kpi-num" id="kpi-median">—</span><span class="kpi-label">median implied value</span></div>
+</section>
+
+<section class="controls">
+  <input type="search" id="q" placeholder="Search name or slug…" aria-label="Search">
+  <select id="cat" aria-label="Category"><option value="">All categories</option></select>
+  <select id="verdict" aria-label="Verdict">
+    <option value="">All verdicts</option>
+    <option>FARM FIRST</option>
+    <option>FARM</option>
+    <option>WATCH</option>
+    <option>SKIP</option>
+  </select>
+  <label class="check"><input type="checkbox" id="watchonly"> Watchlist only</label>
+  <span class="count" id="rowcount"></span>
+</section>
+<p class="hint">Click a column header to sort. Click any row to open its full breakdown: the model's
+term-by-term decomposition, the peer record for its category, and a costed farm plan.</p>
+<noscript><p class="hint">This board needs JavaScript: all figures are rendered from the generated data file.</p></noscript>
+
+<main>
+  <table id="board">
+    <thead>
+      <tr>
+        <th data-key="rank">Rank</th>
+        <th data-key="name">Protocol</th>
+        <th data-key="category">Category</th>
+        <th data-key="tvl_usd" class="num">TVL</th>
+        <th data-key="change_7d" class="num">7d %</th>
+        <th data-key="ageDays" class="num">Age (yrs)</th>
+        <th data-key="peer" class="num">Peer record</th>
+        <th data-key="implied_value_usd" class="num">Implied value</th>
+        <th data-key="verdict">Verdict</th>
+      </tr>
+    </thead>
+    <tbody id="rows"></tbody>
+  </table>
+
+  <section id="detail" class="detail hidden" aria-live="polite"></section>
+</main>
+
+<footer class="foot">
+  <p>Farm plans are costed estimates built from category archetypes, not promises of an airdrop.
+  Implied values are model claims with the error bars stated above.</p>
+</footer>
+
 <script src="../data.js"></script>
-<script src="farm.js"></script>
 <script src="app.js"></script>
 </body>
 </html>
